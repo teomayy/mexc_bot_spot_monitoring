@@ -14,8 +14,8 @@ sys.path.append(os.path.abspath("websocket_proto"))
 import PushDataV3ApiWrapper_pb2
 
 # 🔧 Конфигурация
-TELEGRAM_BOT_TOKEN = " "
-TELEGRAM_CHAT_ID = " "
+TELEGRAM_BOT_TOKEN = "TOKEN БОТА"
+TELEGRAM_CHAT_ID = "ВАШ ЧАТ ID"
 ORDER_THRESHOLD = 2000  # 💰 Порог сделки (настраиваемый)
 VOLUME_THRESHOLD = 50  # 📊 Порог объема за 1 минуту
 WS_URL = "wss://wbs-api.mexc.com/ws"
@@ -181,7 +181,11 @@ async def handle_messages(ws):
 
 async def send_telegram_message(order_size, ticker, side):
     """Отправляет уведомление в Telegram"""
-    message = f"{'🟢' if side == 'BUY' else '🔴'} *{ticker}*\n\n💰 {order_size:.2f} USDT"
+
+    if text:
+        message = text
+    else: 
+        message = f"{'🟢' if side == 'BUY' else '🔴'} *{ticker.replace('USDT', '')}*\n\n💰 {order_size:.2f} $"
 
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -223,6 +227,34 @@ async def connect_to_mexc(tickers):
 
 MAX_ACTIVE_CONNECTIONS = 5  # Ограничим одновременные соединения
 
+async def send_telegram_message(order_size=None, ticker=None, side=None, text=None):
+    """Отправляет уведомление в Telegram"""
+    if text:
+        message = text  # Если передан текст, просто отправляем его
+    else:
+        message = f"{'🟢' if side == 'BUY' else '🔴'} *{ticker.replace('USDT', '')}*\n\n💰 {order_size:.2f} $"
+
+    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+
+    print(f"📨 Отправка в Telegram: {message}")  # Логирование
+    print(f"🔗 Запрос: {telegram_url}, Данные: {payload}")  # Логирование URL и payload
+
+    try:
+        response = requests.post(telegram_url, json=payload)
+        response_data = response.json()
+        print(f"📩 Ответ Telegram API: {response_data}")  # Логирование ответа API
+        response.raise_for_status()
+
+        if not response_data.get("ok"):
+            print(f"⚠️ Ошибка отправки сообщения: {response_data.get('description')}")
+    except requests.RequestException as e:
+        print(f"❌ Ошибка отправки в Telegram: {e}")
+
 async def main():
     tickers = await get_all_tickers()
     tickers = filter_tickers(tickers)
@@ -231,7 +263,17 @@ async def main():
         logger.error("❌ Нет доступных тикеров!")
         return
 
-    await send_telegram_message(50000, "BTCUSDT", "BUY")
+    # Получаем имя пользователя из Telegram API
+    user_info_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getChat?chat_id={TELEGRAM_CHAT_ID}"
+    try:
+        response = requests.get(user_info_url)
+        user_data = response.json()
+        username = user_data.get("result", {}).get("first_name", "друг")  # Дефолтное значение "друг"
+    except requests.RequestException:
+        username = "друг"
+
+    # Отправляем приветственное сообщение
+    await send_telegram_message(text=f"👋 Привет, {username}!\nЯ запущен и готов мониторить сделки на MEXC.")
 
     tasks = []
     for i in range(0, len(tickers), TICKERS_PER_BATCH):

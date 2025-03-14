@@ -14,8 +14,8 @@ sys.path.append(os.path.abspath("websocket_proto"))
 import PushDataV3ApiWrapper_pb2
 
 # 🔧 Конфигурация
-TELEGRAM_BOT_TOKEN = "TOKEN БОТА"
-TELEGRAM_CHAT_ID = "ВАШ ЧАТ ID"
+TELEGRAM_BOT_TOKEN = "7704411203:AAEKrNkZK1KaVXYqI7QiVszNVDqe6PNopbs"
+TELEGRAM_CHAT_ID = "7800907892"
 ORDER_THRESHOLD = 2000  # 💰 Порог сделки (настраиваемый)
 VOLUME_THRESHOLD = 50  # 📊 Порог объема за 1 минуту
 WS_URL = "wss://wbs-api.mexc.com/ws"
@@ -59,14 +59,77 @@ async def get_all_tickers():
         logger.error(f"Ошибка получения тикеров: {e}")
         return []
 
-def filter_tickers(tickers):
-    """Фильтрует тикеры: оставляет только спот и исключает дубли с Binance, Bybit, OKX"""
-    filtered_tickers = [
-        ticker for ticker in tickers
-        if not any(exchange in ticker.lower() for exchange in EXCLUDED_EXCHANGES)
-    ]
-    logger.info(f"✅ После фильтрации осталось {len(filtered_tickers)} тикеров")
+def get_bybit_tickers():
+    url = "https://api.bybit.com/v5/market/instruments-info?category=spot"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        return {item["symbol"] for item in data.get("result", {}).get("list", [])}
+    except requests.RequestException as e:
+        logger.error(f"❌ Ошибка загрузки тикеров с Bybit: {e}")
+        return set()
+
+def get_okx_tickers():
+    url = "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        return {item["instId"].replace("-", "") for item in data.get("data", [])}
+    except requests.RequestException as e:
+        logger.error(f"❌ Ошибка загрузки тикеров с OKX: {e}")
+        return set()
+
+def get_tickers_from_exchange(url, exchange_name):
+    """Получает список тикеров с другой биржи (Binance, Bybit, OKX)"""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+
+        # Binance и Bybit отдают тикеры в разном формате
+        if "symbols" in data:  # Binance
+            tickers = {item["symbol"] for item in data["symbols"]}
+        elif "result" in data and "list" in data["result"]:  # Bybit
+            tickers = {item["name"].replace("/", "") for item in data["result"]["list"]}
+        else:
+            tickers = set()
+
+        logger.info(f"🔻 Загружено {len(tickers)} тикеров с {exchange_name}")
+        return tickers
+    except requests.RequestException as e:
+        logger.error(f"❌ Ошибка загрузки тикеров с {exchange_name}: {e}")
+        return set()
+
+def load_blacklist_tickers():
+    """Загружает тикеры с Binance, Bybit и OKX для исключения"""
+    binance_tickers = get_tickers_from_exchange("https://api.binance.com/api/v3/exchangeInfo", "Binance")
+    bybit_tickers = get_bybit_tickers()
+    okx_tickers = get_okx_tickers()
+
+    blacklist = binance_tickers | bybit_tickers | okx_tickers  # Объединяем списки
+    logger.info(f"📛 Итоговый список исключенных тикеров: {len(blacklist)}")
+    return blacklist
+
+
+
+def filter_tickers(tickers, blacklist):
+    """Фильтрует тикеры, исключая те, что есть на Binance, Bybit и OKX"""
+    before_filtering = len(tickers)
+    
+    excluded_tickers = [t for t in tickers if t in blacklist]
+    filtered_tickers = [t for t in tickers if t not in blacklist]
+
+    logger.info(f"📌 Первые 50 тикеров до фильтрации: {tickers[:50]}")
+    logger.info(f"📌 Первые 50 тикеров после фильтрации: {filtered_tickers[:50]}")
+    logger.info(f"🔎 Пример исключенных тикеров: {excluded_tickers[:50]}")
+
+    logger.info(f"✅ {len(filtered_tickers)} / {before_filtering} тикеров отслеживаются")
+    logger.info(f"❌ Исключено {len(excluded_tickers)} тикеров: {excluded_tickers[:20]} ...")
+
     return filtered_tickers
+
 
 def update_volume_tracker(ticker, volume):
     """Обновляет объем сделок за 1 минуту"""
@@ -256,8 +319,9 @@ async def send_telegram_message(order_size=None, ticker=None, side=None, text=No
         print(f"❌ Ошибка отправки в Telegram: {e}")
 
 async def main():
+    blacklist = load_blacklist_tickers()
     tickers = await get_all_tickers()
-    tickers = filter_tickers(tickers)
+    tickers = filter_tickers(tickers, blacklist)
 
     if not tickers:
         logger.error("❌ Нет доступных тикеров!")

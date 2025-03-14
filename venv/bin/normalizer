@@ -1,4 +1,4 @@
-#!/home/arbic/Desktop/Projects/mexc_bot/venv/bin/python3
+#!/Users/arbic/Desktop/mexc_bot/venv/bin/python3.13
 # -*- coding: utf-8 -*-
 import re
 import sys

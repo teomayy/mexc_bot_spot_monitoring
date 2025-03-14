@@ -14,8 +14,8 @@ sys.path.append(os.path.abspath("websocket_proto"))
 import PushDataV3ApiWrapper_pb2
 
 # 🔧 Конфигурация
-TELEGRAM_BOT_TOKEN = "7704411203:AAEKrNkZK1KaVXYqI7QiVszNVDqe6PNopbs"
-TELEGRAM_CHAT_ID = "7800907892"
+TELEGRAM_BOT_TOKEN = " "
+TELEGRAM_CHAT_ID = " "
 ORDER_THRESHOLD = 2000  # 💰 Порог сделки (настраиваемый)
 VOLUME_THRESHOLD = 50  # 📊 Порог объема за 1 минуту
 WS_URL = "wss://wbs-api.mexc.com/ws"

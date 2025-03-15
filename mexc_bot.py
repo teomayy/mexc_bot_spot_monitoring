@@ -5,6 +5,7 @@ import random
 import websockets
 import sys
 import os
+import re
 import requests
 from datetime import datetime, timezone, timedelta
 from google.protobuf.message import DecodeError
@@ -37,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 # Трекинг объема сделок
 volume_tracker = {}
+
+# Очередь для тикеров
+ticker_queue = asyncio.Queue()
 
 # ❌ Чёрный список бирж (Binance, Bybit, OKX)
 EXCLUDED_EXCHANGES = {"binance", "bybit", "okx"}
@@ -85,7 +89,9 @@ def get_bybit_tickers():
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-        return {item["symbol"] for item in data.get("result", {}).get("list", [])}
+        tickers =  {item["symbol"] for item in data.get("result", {}).get("list", [])}
+        logger.info(f"✅ Загружено {len(tickers)} тикеров с ByBit")
+        return tickers
     except requests.RequestException as e:
         logger.error(f"❌ Ошибка загрузки тикеров с Bybit: {e}")
         return set()
@@ -96,7 +102,9 @@ def get_okx_tickers():
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-        return {item["instId"].replace("-", "") for item in data.get("data", [])}
+        tickers = {item["instId"].replace("-", "") for item in data.get("data", [])}
+        logger.info(f"✅ Загружено {len(tickers)} тикеров с OKX")
+        return tickers
     except requests.RequestException as e:
         logger.error(f"❌ Ошибка загрузки тикеров с OKX: {e}")
         return set()
@@ -134,7 +142,7 @@ def update_volume_tracker(ticker, volume, ticker_index, total_tickers):
     total_volume = sum(v for v, _ in volume_tracker[ticker])
 
     # Логируем обновление объема + отслеживание тикера
-    logger.info(f"📈 Обновлен объем для {ticker}: {total_volume} USDT")
+    logger.info(f"📊 Объем 1m для {ticker}: {total_volume:.2f} USDT")
     logger.info(f"🔍 Отслеживание тикера {ticker} [{ticker_index} / {total_tickers}]")
 
     return total_volume
@@ -199,8 +207,13 @@ async def handle_messages(ws, ticker_count, total_tickers):
 
                         logger.info(f"💰 {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
 
-                        if total >= ORDER_THRESHOLD and total_volume >= VOLUME_THRESHOLD:
-                            await send_telegram_message(total, symbol, side)
+                       # 🔔 Алерт 1: Крупные маркет-ордера
+                        if total >= ORDER_THRESHOLD:
+                            await send_telegram_message(order_size=total, ticker=symbol, side=side, alert_type="global_order")
+
+                        # 🔔 Алерт 2: Объем 1m превысил порог
+                        if total_volume >= VOLUME_THRESHOLD:
+                            await send_telegram_message(order_size=total_volume, ticker=symbol, side=side, alert_type="volume_1m")
                 continue
 
             # Если данные бинарные, парсим Protobuf
@@ -221,10 +234,16 @@ async def handle_messages(ws, ticker_count, total_tickers):
 
                         total_volume = update_volume_tracker(symbol, volume, ticker_count, total_tickers)
 
-                        logger.info(f"💰 Protobuf {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
+                      ##  logger.info(f"💰 Protobuf {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
 
-                        if total >= ORDER_THRESHOLD and total_volume >= VOLUME_THRESHOLD:
-                            await send_telegram_message(total, symbol, side)
+                        # 🔔 Алерт 1: Крупные маркет-ордера
+                        # 🔔 Алерт 1: Крупные маркет-ордера
+                        if total >= ORDER_THRESHOLD:
+                            await send_telegram_message(order_size=total, ticker=symbol, side=side, alert_type="global_order")
+
+                        # 🔔 Алерт 2: Объем 1m превысил порог
+                        if total_volume >= VOLUME_THRESHOLD:
+                            await send_telegram_message(order_size=total_volume, ticker=symbol, side=side, alert_type="volume_1m")
                 else:
                     logger.warning(f"⚠️ Нет 'publicAggreDeals' в Protobuf: {data}")
 
@@ -245,12 +264,20 @@ async def connect_to_mexc(tickers, ticker_count, total_tickers):
             logger.warning(f"🔌 Переподключение через {RECONNECT_DELAY} секунд...")
             await asyncio.sleep(RECONNECT_DELAY)
 
-async def send_telegram_message(order_size=None, ticker=None, side=None, text=None):
+def escape_markdown(text):
+    """Экранирует специальные символы в Markdown, чтобы избежать ошибок Telegram API"""
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return re.sub(r'([%s])' % re.escape(escape_chars), r'\\\1', text)
+
+async def send_telegram_message(order_size=None, ticker=None, side=None, text=None, alert_type=None):
     """Отправляет уведомление в Telegram"""
     if text:
-        message = text  # Если передан текст, просто отправляем его
-    else:
-        message = f"{'🟢' if side == 'BUY' else '🔴'} *{ticker.replace('USDT', '')}*\n\n💰 {order_size:.2f} $"
+        message = escape_markdown(text)  
+    else :    
+        emoji = "🟢" if side == "BUY" else "🔴"
+        ticker_name = escape_markdown(ticker.replace("USDT", "") )  # Убираем "USDT" из тикера
+        alert_labal = "🔥 1m объем" if alert_type == "volume_1m" else "💰 Маркет ордер"
+        message = f"{emoji} {ticker_name}\n\n💰 {order_size:.2f} $\n\n {alert_labal}"
 
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {

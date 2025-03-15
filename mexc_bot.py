@@ -21,9 +21,18 @@ VOLUME_THRESHOLD = 50  # 📊 Порог объема за 1 минуту
 WS_URL = "wss://wbs-api.mexc.com/ws"
 RECONNECT_DELAY = 5
 TICKERS_PER_BATCH = 10  # Количество тикеров в одном соединении
+MAX_ACTIVE_CONNECTIONS = 20  # Лимит на WebSocket-соединения
+PROGRESS_STEP = 100  # Шаг для логирования прогресса
 
 # 🐜 Логирование
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # Вывод в консоль
+        logging.FileHandler("mexc_bot.log", encoding="utf-8")  # Лог в файл
+    ],
+)
 logger = logging.getLogger(__name__)
 
 # Трекинг объема сделок
@@ -40,24 +49,35 @@ async def get_all_tickers():
         response.raise_for_status()
         data = response.json()
 
-        # Логируем ответ API
-        logger.info(f"🔍 Ответ API MEXC: {data}")
-
-        # Извлекаем тикеры
-        if isinstance(data, dict) and "data" in data:
-            tickers = data["data"]
-            if isinstance(tickers, list):
-                logger.info(f"✅ Загружено {len(tickers)} тикеров")
-                return tickers
-            else:
-                logger.error(f"❌ Ошибка: 'data' не список! {type(tickers)}")
-                return []
+        if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+            tickers = [t for t in data["data"] if t.endswith("USDT")]
+            logger.info(f"✅ Загружено {len(tickers)} тикеров (только USDT)")
+            return tickers
         else:
-            logger.error(f"❌ Некорректный формат API: {data}")
+            logger.error(f"❌ Некорректный формат API MEXC: {data}")
             return []
     except requests.RequestException as e:
         logger.error(f"Ошибка получения тикеров: {e}")
         return []
+
+def get_binance_tickers():
+    """Загружает тикеры с Binance (только USDT)"""
+    url = "https://api.binance.com/api/v3/exchangeInfo"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+
+        if "symbols" in data and isinstance(data["symbols"], list):
+            tickers = {item["symbol"] for item in data["symbols"] if item["symbol"].endswith("USDT")}
+            logger.info(f"✅ Загружено {len(tickers)} тикеров с Binance")
+            return tickers
+        else:
+            logger.error(f"❌ Ошибка формата данных Binance: {data}")
+            return set()
+    except requests.RequestException as e:
+        logger.error(f"❌ Ошибка загрузки тикеров с Binance: {e}")
+        return set()
 
 def get_bybit_tickers():
     url = "https://api.bybit.com/v5/market/instruments-info?category=spot"
@@ -81,58 +101,26 @@ def get_okx_tickers():
         logger.error(f"❌ Ошибка загрузки тикеров с OKX: {e}")
         return set()
 
-def get_tickers_from_exchange(url, exchange_name):
-    """Получает список тикеров с другой биржи (Binance, Bybit, OKX)"""
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-
-        # Binance и Bybit отдают тикеры в разном формате
-        if "symbols" in data:  # Binance
-            tickers = {item["symbol"] for item in data["symbols"]}
-        elif "result" in data and "list" in data["result"]:  # Bybit
-            tickers = {item["name"].replace("/", "") for item in data["result"]["list"]}
-        else:
-            tickers = set()
-
-        logger.info(f"🔻 Загружено {len(tickers)} тикеров с {exchange_name}")
-        return tickers
-    except requests.RequestException as e:
-        logger.error(f"❌ Ошибка загрузки тикеров с {exchange_name}: {e}")
-        return set()
-
 def load_blacklist_tickers():
     """Загружает тикеры с Binance, Bybit и OKX для исключения"""
-    binance_tickers = get_tickers_from_exchange("https://api.binance.com/api/v3/exchangeInfo", "Binance")
+    binance_tickers = get_binance_tickers()
     bybit_tickers = get_bybit_tickers()
     okx_tickers = get_okx_tickers()
 
-    blacklist = binance_tickers | bybit_tickers | okx_tickers  # Объединяем списки
+    blacklist = binance_tickers | bybit_tickers | okx_tickers
     logger.info(f"📛 Итоговый список исключенных тикеров: {len(blacklist)}")
     return blacklist
 
 
 
 def filter_tickers(tickers, blacklist):
-    """Фильтрует тикеры, исключая те, что есть на Binance, Bybit и OKX"""
-    before_filtering = len(tickers)
-    
-    excluded_tickers = [t for t in tickers if t in blacklist]
+    """Фильтрует тикеры, исключая тикеры с Binance, Bybit и OKX"""
     filtered_tickers = [t for t in tickers if t not in blacklist]
-
-    logger.info(f"📌 Первые 50 тикеров до фильтрации: {tickers[:50]}")
-    logger.info(f"📌 Первые 50 тикеров после фильтрации: {filtered_tickers[:50]}")
-    logger.info(f"🔎 Пример исключенных тикеров: {excluded_tickers[:50]}")
-
-    logger.info(f"✅ {len(filtered_tickers)} / {before_filtering} тикеров отслеживаются")
-    logger.info(f"❌ Исключено {len(excluded_tickers)} тикеров: {excluded_tickers[:20]} ...")
-
+    logger.info(f"✅ Окончательное количество тикеров после фильтрации: {len(filtered_tickers)}")
     return filtered_tickers
 
-
-def update_volume_tracker(ticker, volume):
-    """Обновляет объем сделок за 1 минуту"""
+def update_volume_tracker(ticker, volume, ticker_index, total_tickers):
+    """Обновляет объем сделок за 1 минуту и логирует прогресс отслеживания тикеров"""
     now = datetime.now(timezone.utc)
     
     if ticker not in volume_tracker:
@@ -144,32 +132,34 @@ def update_volume_tracker(ticker, volume):
     volume_tracker[ticker] = [(v, t) for v, t in volume_tracker[ticker] if now - t < timedelta(minutes=1)]
     
     total_volume = sum(v for v, _ in volume_tracker[ticker])
-    print(f"📈 Обновлен объем для {ticker}: {total_volume} USDT")  # Добавили print
+
+    # Логируем обновление объема + отслеживание тикера
+    logger.info(f"📈 Обновлен объем для {ticker}: {total_volume} USDT")
+    logger.info(f"🔍 Отслеживание тикера {ticker} [{ticker_index} / {total_tickers}]")
 
     return total_volume
 
 
-async def subscribe_to_tickers(ws, tickers):
-    print(f"📡 Подписка на тикеры: {tickers}")  # <-- Добавили print
+async def subscribe_to_tickers(ws, tickers, start_index, total_tickers):
+    """Подписка на сделки через WebSocket"""
     subscribe_msg = {
         "method": "SUBSCRIPTION",
         "params": [f"spot@public.aggre.deals.v3.api.pb@100ms@{ticker}" for ticker in tickers],
         "id": random.randint(1, 100000)
     }
-    print(f"📡 Отправка WebSocket-сообщения: {json.dumps(subscribe_msg, indent=2)}")
     await ws.send(json.dumps(subscribe_msg))
-    logger.info(f"✅ Подписка на {len(tickers)} тикеров")
-
+    
+    for i, ticker in enumerate(tickers, start=start_index):
+        logger.info(f"📡 Отслеживание тикера {ticker} [{i} / {total_tickers}]")
 
 
 async def send_ping(ws):
+    """Периодически отправляет PING, чтобы поддерживать соединение"""
     while True:
         try:
-            print("📡 Отправка PING")  # <-- Добавили print
-            logger.info("📡 Отправлен PING")
             await ws.send(json.dumps({"method": "PING"}))
+            logger.info("📡 Отправлен PING")
         except websockets.exceptions.ConnectionClosed:
-            print("⚠️ WebSocket закрыт, прекращаем PING")
             logger.warning("⚠️ WebSocket закрыт, прекращаем PING")
             break
         await asyncio.sleep(30)
@@ -187,108 +177,73 @@ def on_error(ws, error):
     print(f"❌ Ошибка WebSocket: {error}")  # <-- Добавили print
 
 
-async def handle_messages(ws):
+async def handle_messages(ws, ticker_count, total_tickers):
     """Обрабатывает входящие сообщения WebSocket"""
     async for message in ws:
-        print(f"📩 Получено сообщение от WebSocket: {message[:500]}")  # Логируем первые 500 символов
         try:
             if isinstance(message, str):  # JSON-ответ
                 data_json = json.loads(message)
 
                 if "deals" in data_json:
                     symbol = data_json.get("symbol", "UNKNOWN")
-                    print(f"📊 Получена сделка по {symbol}: {data_json['deals']}")  # Добавляем print
+                    deals = data_json["deals"]
+                    logger.info(f"🔍 JSON-сделка по {symbol}: {deals}")  # Логируем сделки
 
-                    for deal in data_json["deals"]:
+                    for deal in deals:
                         price = float(deal.get("price", 0))
                         volume = float(deal.get("quantity", 0))
                         total = price * volume
                         side = "BUY" if deal.get("tradeType") == 1 else "SELL"
 
-                        total_volume = update_volume_tracker(symbol, volume)
+                        total_volume = update_volume_tracker(symbol, volume, ticker_count, total_tickers)
 
-                        print(f"💰 Сделка {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
+                        logger.info(f"💰 {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
 
                         if total >= ORDER_THRESHOLD and total_volume >= VOLUME_THRESHOLD:
                             await send_telegram_message(total, symbol, side)
                 continue
 
             # Если данные бинарные, парсим Protobuf
-            data = PushDataV3ApiWrapper_pb2.PushDataV3ApiWrapper()
-            data.ParseFromString(message)
+            if PushDataV3ApiWrapper_pb2:
+                data = PushDataV3ApiWrapper_pb2.PushDataV3ApiWrapper()
+                data.ParseFromString(message)
 
-            if hasattr(data, "publicAggreDeals"):
-                symbol = data.symbol
-                print(f"📊 Protobuf-сделка по {symbol}: {data}")  # Логируем Protobuf-сообщение
+                if hasattr(data, "publicAggreDeals"):
+                    symbol = data.symbol
+                    deals = data.publicAggreDeals.deals
+                    logger.info(f"🔍 Protobuf-сделка по {symbol}: {deals}")  # Логируем сделки
 
-                for deal in data.publicAggreDeals.deals:
-                    price = float(deal.price)
-                    volume = float(deal.quantity)
-                    total = price * volume
-                    side = "BUY" if deal.tradeType == 1 else "SELL"
+                    for deal in deals:
+                        price = float(deal.price)
+                        volume = float(deal.quantity)
+                        total = price * volume
+                        side = "BUY" if deal.tradeType == 1 else "SELL"
 
-                    total_volume = update_volume_tracker(symbol, volume)
+                        total_volume = update_volume_tracker(symbol, volume, ticker_count, total_tickers)
 
-                    print(f"💰 Protobuf {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
+                        logger.info(f"💰 Protobuf {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
 
-                    if total >= ORDER_THRESHOLD and total_volume >= VOLUME_THRESHOLD:
-                        await send_telegram_message(total, symbol, side)
-            else:
-                logger.warning(f"⚠️ Нет 'publicAggreDeals' в Protobuf: {data}")
+                        if total >= ORDER_THRESHOLD and total_volume >= VOLUME_THRESHOLD:
+                            await send_telegram_message(total, symbol, side)
+                else:
+                    logger.warning(f"⚠️ Нет 'publicAggreDeals' в Protobuf: {data}")
 
         except json.JSONDecodeError:
             logger.error("❌ Ошибка обработки JSON данных")
         except DecodeError:
             logger.error("❌ Ошибка обработки Protobuf данных")
 
-
-async def send_telegram_message(order_size, ticker, side):
-    """Отправляет уведомление в Telegram"""
-
-    if text:
-        message = text
-    else: 
-        message = f"{'🟢' if side == 'BUY' else '🔴'} *{ticker.replace('USDT', '')}*\n\n💰 {order_size:.2f} $"
-
-    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
-
-    print(f"📨 Отправка в Telegram: {message}")  # Добавили print
-    print(f"🔗 Запрос: {telegram_url}, Данные: {payload}")  # Логируем URL и payload
-
-    try:
-        response = requests.post(telegram_url, json=payload)
-        response_data = response.json()
-        print(f"📩 Ответ Telegram API: {response_data}")  # Логируем ответ API
-        response.raise_for_status()
-
-        if not response_data.get("ok"):
-            print(f"⚠️ Ошибка отправки сообщения: {response_data.get('description')}")
-    except requests.RequestException as e:
-        print(f"❌ Ошибка отправки в Telegram: {e}")
-
-
-
-
-async def connect_to_mexc(tickers):
+async def connect_to_mexc(tickers, ticker_count, total_tickers):
+    """Подключение к WebSocket и подписка на тикеры"""
     while True:
         try:
-            print(f"🔌 Подключаемся к WebSocket для {len(tickers)} тикеров")  # <-- Добавили print
             async with websockets.connect(WS_URL) as ws:
-                logger.info("✅ Подключение к WebSocket MEXC")
-                await subscribe_to_tickers(ws, tickers)
-                await asyncio.gather(handle_messages(ws), send_ping(ws))
+                logger.info(f"✅ Подключение к WebSocket для {ticker_count}/{total_tickers} тикеров")
+                await subscribe_to_tickers(ws, tickers, ticker_count, total_tickers)
+                await asyncio.gather(handle_messages(ws, ticker_count, total_tickers), send_ping(ws))
         except websockets.exceptions.ConnectionClosedError:
-            print(f"🔌 Соединение закрыто, переподключение через {RECONNECT_DELAY} секунд...")
-            logger.warning(f"🔌 Соединение закрыто, переподключение через {RECONNECT_DELAY} секунд...")
+            logger.warning(f"🔌 Переподключение через {RECONNECT_DELAY} секунд...")
             await asyncio.sleep(RECONNECT_DELAY)
-
-
-MAX_ACTIVE_CONNECTIONS = 5  # Ограничим одновременные соединения
 
 async def send_telegram_message(order_size=None, ticker=None, side=None, text=None):
     """Отправляет уведомление в Telegram"""
@@ -339,13 +294,26 @@ async def main():
     # Отправляем приветственное сообщение
     await send_telegram_message(text=f"👋 Привет, {username}!\nЯ запущен и готов мониторить сделки на MEXC.")
 
+    total_tickers = len(tickers)
     tasks = []
-    for i in range(0, len(tickers), TICKERS_PER_BATCH):
-        if len(tasks) >= MAX_ACTIVE_CONNECTIONS:  # Ограничение количества активных соединений
+    progress = 0
+
+    for i in range(0, total_tickers, TICKERS_PER_BATCH):
+        if len(tasks) >= MAX_ACTIVE_CONNECTIONS:
             done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            tasks = list(tasks)
+
         batch = tickers[i:i + TICKERS_PER_BATCH]
-        tasks.append(asyncio.create_task(connect_to_mexc(batch)))
+        ticker_count = i + len(batch)
+        tasks.append(asyncio.create_task(connect_to_mexc(batch, ticker_count, total_tickers)))
+
+        # Логируем прогресс каждые PROGRESS_STEP тикеров
+        if ticker_count >= progress + PROGRESS_STEP:
+            logger.info(f"📈 Прогресс: {ticker_count} / {total_tickers} тикеров отслеживается")
+            progress = ticker_count
+
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
+    logger.info("🚀 Бот запущен!")
     asyncio.run(main())

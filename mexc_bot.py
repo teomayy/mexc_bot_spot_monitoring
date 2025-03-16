@@ -127,32 +127,39 @@ def filter_tickers(tickers, blacklist):
     logger.info(f"✅ Окончательное количество тикеров после фильтрации: {len(filtered_tickers)}")
     return filtered_tickers
 
-def update_volume_tracker(ticker, volume, ticker_index, total_tickers):
+def update_volume_tracker(ticker, price, volume, ticker_index, total_tickers, trade_time):
     """Обновляет объем сделок за 1 минуту и логирует прогресс отслеживания тикеров"""
     now = datetime.now(timezone.utc)
     
     if ticker not in volume_tracker:
         volume_tracker[ticker] = []
 
-    volume_tracker[ticker].append((volume, now))
+    # Конвертируем объем в доллары
+    volume_in_usdt = price * volume
+
+    # Добавляем новую сделку в трекер
+    volume_tracker[ticker].append((volume_in_usdt, trade_time))
 
     # Удаляем старые сделки (старше 1 минуты)
     volume_tracker[ticker] = [(v, t) for v, t in volume_tracker[ticker] if now - t < timedelta(minutes=1)]
-    
+
+    # Считаем общий объем за 1 минуту
     total_volume = sum(v for v, _ in volume_tracker[ticker])
 
     # Логируем обновление объема + отслеживание тикера
-    logger.info(f"📊 Объем 1m для {ticker}: {total_volume:.2f} USDT")
+    logger.info(f"📊 Обновление {ticker}: Объем за 1 минуту: {total_volume:.2f} USDT ({len(volume_tracker[ticker])} сделок)")
     logger.info(f"🔍 Отслеживание тикера {ticker} [{ticker_index} / {total_tickers}]")
 
     return total_volume
+
+
 
 
 async def subscribe_to_tickers(ws, tickers, start_index, total_tickers):
     """Подписка на сделки через WebSocket"""
     subscribe_msg = {
         "method": "SUBSCRIPTION",
-        "params": [f"spot@public.aggre.deals.v3.api.pb@100ms@{ticker}" for ticker in tickers],
+        "params": [f"spot@public.aggre.deals.v3.api.pb@10ms@{ticker}" for ticker in tickers],
         "id": random.randint(1, 100000)
     }
     await ws.send(json.dumps(subscribe_msg))
@@ -203,9 +210,17 @@ async def handle_messages(ws, ticker_count, total_tickers):
                         total = price * volume
                         side = "BUY" if deal.get("tradeType") == 1 else "SELL"
 
-                        total_volume = update_volume_tracker(symbol, volume, ticker_count, total_tickers)
+                        trade_time = datetime.fromtimestamp(deal["time"] / 1000, tz=timezone.utc)
+                        now = datetime.now(timezone.utc)
 
-                        logger.info(f"💰 {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
+                         # Игнорируем сделки старше 1 минуты
+                        if now - trade_time > timedelta(minutes=1):
+                            continue
+
+                        total_volume = update_volume_tracker(symbol, price, volume, ticker_count, total_tickers, trade_time)
+
+                         # 📢 Логируем сделки и проверяем пороги
+                        logger.info(f"💰 {side} {symbol}: {total:.2f} USDT (Маркет-порог: {ORDER_THRESHOLD}, 1m объем: {total_volume})")
 
                        # 🔔 Алерт 1: Крупные маркет-ордера
                         if total >= ORDER_THRESHOLD:
@@ -232,11 +247,16 @@ async def handle_messages(ws, ticker_count, total_tickers):
                         total = price * volume
                         side = "BUY" if deal.tradeType == 1 else "SELL"
 
-                        total_volume = update_volume_tracker(symbol, volume, ticker_count, total_tickers)
+                        trade_time = datetime.fromtimestamp(deal.time / 1000, tz=timezone.utc)
+                        now = datetime.now(timezone.utc)
 
-                      ##  logger.info(f"💰 Protobuf {side} {symbol}: {total:.2f} USDT (Порог {ORDER_THRESHOLD}, Объем {total_volume})")
+                        if now - trade_time > timedelta(minutes=1):
+                            continue
 
-                        # 🔔 Алерт 1: Крупные маркет-ордера
+                        total_volume = update_volume_tracker(symbol, price,  volume, ticker_count, total_tickers, trade_time)
+
+                        logger.info(f"💰 {side} {symbol}: {total:.2f} USDT (Маркет-порог: {ORDER_THRESHOLD}, 1m объем: {total_volume})")
+                                  
                         # 🔔 Алерт 1: Крупные маркет-ордера
                         if total >= ORDER_THRESHOLD:
                             await send_telegram_message(order_size=total, ticker=symbol, side=side, alert_type="global_order")
